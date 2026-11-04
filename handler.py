@@ -22,17 +22,23 @@ except Exception:  # reported through the job answer - worker logs are hard to r
     ERR = traceback.format_exc()[-1500:]
 
 
+def ffmpeg(args, data=None):
+    p = subprocess.run(["ffmpeg", "-v", "error"] + args, input=data, capture_output=True)
+    if p.returncode != 0:
+        raise RuntimeError("ffmpeg: " + p.stderr.decode("utf-8", "replace")[-600:])
+    return p.stdout
+
+
 def decode(path):
-    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-f", "f32le", "-ac", "2", "-ar", str(SR), "-"],
-                         capture_output=True, check=True).stdout
+    raw = ffmpeg(["-i", path, "-f", "f32le", "-ac", "2", "-ar", str(SR), "-"])
     return torch.from_numpy(np.frombuffer(raw, np.float32).reshape(-1, 2).T.copy())
 
 
 def encode(wav, kbps):
+    """Native AAC in an ADTS stream: present in every ffmpeg build (the image's conda ffmpeg has no libvorbis)."""
     raw = wav.clamp(-1, 1).T.contiguous().numpy().astype(np.float32).tobytes()
-    out = subprocess.run(["ffmpeg", "-v", "error", "-f", "f32le", "-ac", "2", "-ar", str(SR), "-i", "-",
-                          "-c:a", "libvorbis", "-b:a", f"{kbps}k", "-f", "ogg", "-"],
-                         input=raw, capture_output=True, check=True).stdout
+    out = ffmpeg(["-f", "f32le", "-ac", "2", "-ar", str(SR), "-i", "-", "-c:a", "aac", "-b:a", f"{kbps}k",
+                  "-f", "adts", "-"], raw)
     return base64.b64encode(out).decode()
 
 
@@ -63,9 +69,13 @@ def handler(job):
     src = src * s + m
     vocals = src[MODEL.sources.index("vocals")]
     inst = src.sum(0) - vocals
-    res = {"sr": SR, "seconds": round(wav.shape[1] / SR, 1), "audio": encode(inst, int(inp.get("kbps", 128)))}
-    if inp.get("want_vocals"):
-        res["vocals"] = encode(vocals, int(inp.get("kbps", 128)))
+    try:
+        res = {"sr": SR, "seconds": round(wav.shape[1] / SR, 1), "format": "aac",
+               "audio": encode(inst, int(inp.get("kbps", 128)))}
+        if inp.get("want_vocals"):
+            res["vocals"] = encode(vocals, int(inp.get("kbps", 128)))
+    except Exception:
+        return {"error": "encode failed: " + traceback.format_exc()[-800:]}
     return res
 
 
