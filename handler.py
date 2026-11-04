@@ -28,6 +28,7 @@ except Exception:  # reported through the job answer - worker logs are hard to r
 
 MODELS = {}
 FA = {}
+BROKEN = []  # CUDA failures on this worker - it is refreshed after the job
 
 
 def demucs_model(name):
@@ -75,20 +76,45 @@ def encode(wav, sr, kbps):
     return base64.b64encode(out).decode()
 
 
+def gpu_info():
+    try:
+        if DEVICE == "cuda":
+            return f"{torch.cuda.get_device_name(0)} sm_{''.join(map(str, torch.cuda.get_device_capability(0)))}"
+    except Exception:
+        pass
+    return DEVICE
+
+
+def run_demucs(name, x, shifts, device):
+    model = demucs_model(name) if device == DEVICE else get_model(name).eval()
+    with torch.no_grad():
+        return apply_model(model, x.to(device), device=device, shifts=shifts, split=True, overlap=0.25,
+                           progress=False)[0].cpu()
+
+
 def separate(inp):
-    model = demucs_model(inp.get("model") or "htdemucs_ft")
-    sr = model.samplerate
+    """A broken GPU host ('no kernel image is available', 04.11.2026) falls back to the CPU in the same job
+    (slower, still finishes); the handler then asks RunPod to replace the worker."""
+    name = inp.get("model") or "htdemucs_ft"
+    sr = 44100
     wav = decode(inp["audio"], sr, 2)
     ref = wav.mean(0)
     m, s = ref.mean(), ref.std() + 1e-8
-    with torch.no_grad():
-        src = apply_model(model, ((wav - m) / s)[None].to(DEVICE), device=DEVICE,
-                          shifts=int(inp.get("shifts", 1)), split=True, overlap=0.25, progress=False)[0].cpu()
+    x = ((wav - m) / s)[None]
+    shifts = int(inp.get("shifts", 1))
+    try:
+        src = run_demucs(name, x, shifts, DEVICE)
+    except RuntimeError as e:
+        if DEVICE != "cuda" or "CUDA" not in str(e):
+            raise
+        BROKEN.append(f"{gpu_info()}: {str(e)[:120]}")
+        src = run_demucs(name, x, shifts, "cpu")
+    model = MODELS.get(name) or get_model(name)
     src = src * s + m
     vocals = src[model.sources.index("vocals")]
     inst = src.sum(0) - vocals
     kbps = int(inp.get("kbps", 128))
-    res = {"sr": sr, "seconds": round(wav.shape[1] / sr, 1), "format": "aac", "audio": encode(inst, sr, kbps)}
+    res = {"sr": sr, "device": "cpu (gpu failed)" if BROKEN else gpu_info(), "seconds": round(wav.shape[1] / sr, 1), "format": "aac", "audio": encode(inst, sr, kbps)}
     if inp.get("want_vocals"):
         res["vocals"] = encode(vocals, sr, kbps)
     return res
@@ -123,7 +149,9 @@ def align(inp):
             with torch.inference_mode():
                 em, _ = f["model"](wav[:, a:b].to(DEVICE))
             spans = f["aln"](em[0], f["tok"](["*"] + [words[i] for i in idx] + ["*"]))[1:-1]
-        except Exception:  # too little audio for the letters, etc. - the PC keeps this line's old times
+        except Exception as e:  # too little audio for the letters, etc. - the PC keeps this line's old times
+            if "CUDA" in str(e):
+                raise
             out.append(None)
             continue
         ratio = (b - a) / em.size(1) / sr
@@ -140,9 +168,15 @@ def handler(job):
         return {"error": "worker load failed: " + ERR}
     inp = job["input"]
     try:
-        return align(inp) if inp.get("lines") is not None else separate(inp)
+        res = align(inp) if inp.get("lines") is not None else separate(inp)
     except Exception:
-        return {"error": "job failed: " + traceback.format_exc()[-800:]}
+        tb = traceback.format_exc()
+        if "CUDA" in tb:
+            BROKEN.append(tb[-200:])
+        res = {"error": f"job failed on {gpu_info()}: " + tb[-800:]}
+    if BROKEN:  # a GPU that failed once fails again - let RunPod start a fresh worker
+        res["refresh_worker"] = True
+    return res
 
 
 runpod.serverless.start({"handler": handler})

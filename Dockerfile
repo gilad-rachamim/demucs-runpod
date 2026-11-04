@@ -1,6 +1,7 @@
 # Demucs vocal removal worker for RunPod serverless (Gilad's karaoke-video skill, 04.11.2026).
 # The htdemucs/htdemucs_ft and MMS_FA weights are baked in, so a cold start only has to load them.
-FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime
+# 2.7/cu128 (04.11.2026): 2.4/cu124 failed with "no kernel image is available" on a RunPod GPU; 2.7 covers Ampere..Blackwell
+FROM pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 TORCH_HOME=/models
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
