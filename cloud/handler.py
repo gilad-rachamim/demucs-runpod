@@ -58,6 +58,20 @@ def handler(job):
         hs = setup()
         if job["input"].get("ping"):
             return {"ok": True, "ping": True, "files": sorted(os.listdir(SKILLS))}
+        if job["input"].get("diag"):   # אבחון מהמחשב: סוף הלוג, הקבצים האחרונים, וקובץ אחד לבקשה (עד 8MB)
+            import base64
+            import glob
+            logs = sorted(glob.glob(os.path.join(SKILLS, "telegram-hub", "log", "*.log")))
+            tail = open(logs[-1], encoding="utf-8", errors="replace").read()[-6000:] if logs else ""
+            vid = os.path.join(HOME, "Videos", "karaoke")
+            recent = sorted(glob.glob(os.path.join(vid, "*.*")), key=os.path.getmtime)[-12:]
+            out = {"ok": True, "log": tail, "recent": [os.path.basename(f) for f in recent]}
+            want = job["input"].get("file")
+            if want:
+                f = os.path.join(vid, os.path.basename(want))
+                if os.path.isfile(f) and os.path.getsize(f) < 8_000_000:
+                    out["file"] = base64.b64encode(open(f, "rb").read()).decode()
+            return out
         hs.log(f"cloud job {job.get('id')} item={json.dumps(item, ensure_ascii=False)[:300]}")
         if item.get("bot") == "karaoke" and item.get("act") == "no":
             hs.kf_no(item)
