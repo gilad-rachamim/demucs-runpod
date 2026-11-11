@@ -2,6 +2,7 @@ name: build image
 on:
   push:
     branches: [main]
+    paths-ignore: ['cloud/**', '.github/workflows/cloud.yml']
   workflow_dispatch:
 
 permissions:
@@ -28,3 +29,4 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:latest
             ghcr.io/${{ github.repository }}:${{ github.sha }}
+
